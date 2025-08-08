@@ -17,7 +17,7 @@ class CHANNEL:
     ID = int(os.environ.get("CHANNEL_ID", 0))
 
 class WEB:
-    PORT = int(os.environ.get("PORT", 8000))
+    PORT = int(os.environ.get("PORT", 8080))
 
 class DATABASE:
     URI = os.environ.get("DB_URI", "")
