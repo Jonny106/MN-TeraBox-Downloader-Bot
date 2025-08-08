@@ -167,25 +167,13 @@ async def handle_terabox(client, message: Message):
         if CHANNEL.ID:
             await client.send_document(
                 chat_id=CHANNEL.ID,
-                document=temp_path,
-                caption=caption,
-                file_name=info["name"]
-            )
+             import mimetypes
 
-        sent_msg = await client.send_document(
-            chat_id=message.chat.id,
-            document=temp_path,
-            caption=caption,
-            file_name=info["name"],
-            protect_content=True
-        )
-
-        await message.reply("✅ File will be deleted from your chat after 12 hours.")
-        await asyncio.sleep(43200)
-        try:
-            await sent_msg.delete()
-        except Exception:
-            pass
+              def is_video(filename):
+                 mimetype, _ = mimetypes.guess_type(filename)
+                   return mimetype and mimetype.startswith("video")
+                      except Exception:
+                                   pass
 
     except Exception as e:
         await message.reply(f"❌ Upload failed:\n`{e}`")
