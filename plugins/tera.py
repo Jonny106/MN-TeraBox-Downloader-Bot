@@ -17,6 +17,11 @@ import shutil
 from config import CHANNEL, DATABASE
 #please give credits https://github.com/MN-BOTS
 #  @MrMNTG @MusammilN
+import mimetypes
+
+def is_video(filename):
+    mimetype, _ = mimetypes.guess_type(filename)
+    return mimetype and mimetype.startswith("video")
 
 mongo_client = MongoClient(DATABASE.URI)
 db = mongo_client[DATABASE.NAME]
@@ -164,17 +169,45 @@ async def handle_terabox(client, message: Message):
             f"Link: {url}"
         )
 
-        if CHANNEL.ID:
-            await client.send_document(
-                chat_id=CHANNEL.ID,
-             import mimetypes
-
-              def is_video(filename):
-                 mimetype, _ = mimetypes.guess_type(filename)
-                   return mimetype and mimetype.startswith("video")
-                      except Exception:
-                                   pass
-
+        if is_video(info["name"]):
+    # Send as streamable video
+    if CHANNEL.ID:
+        await client.send_video(
+            chat_id=CHANNEL.ID,
+            video=temp_path,
+            caption=caption,
+            file_name=info["name"]
+        )
+    sent_msg = await client.send_video(
+        chat_id=message.chat.id,
+        video=temp_path,
+        caption=caption,
+        file_name=info["name"],
+        protect_content=True
+    )
+else:
+    # Send as document (default)
+    if CHANNEL.ID:
+        await client.send_document(
+            chat_id=CHANNEL.ID,
+            document=temp_path,
+            caption=caption,
+            file_name=info["name"]
+        )
+    sent_msg = await client.send_document(
+        chat_id=message.chat.id,
+        document=temp_path,
+        caption=caption,
+        file_name=info["name"],
+        protect_content=True
+    )
+       await message.reply("✅ File will be deleted from your chat after 12 hours.")
+        await asyncio.sleep(43200)
+        try:
+            await sent_msg.delete()
+        except Exception:
+            pass
+            
     except Exception as e:
         await message.reply(f"❌ Upload failed:\n`{e}`")
     finally:
