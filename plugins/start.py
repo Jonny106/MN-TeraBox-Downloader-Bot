@@ -24,10 +24,10 @@ class TEXT:
 class INLINE:
     START_BTN = InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton(TEXT.DEVELOPER, url="https://t.me/MrMNTG")],
+            [InlineKeyboardButton(TEXT.DEVELOPER, url="https://t.me/Chowdary106")],
             [
-                InlineKeyboardButton(TEXT.UPDATES_CHANNEL, url="https://t.me/MNBots"),
-                InlineKeyboardButton(TEXT.SOURCE_CODE, url="https://t.me/MNBots_support"),
+                InlineKeyboardButton(TEXT.UPDATES_CHANNEL, url="https://t.me/Request_bots"),
+                InlineKeyboardButton(TEXT.SOURCE_CODE, url="https://t.me/botsadmin_support"),
             ],
         ]
     )
