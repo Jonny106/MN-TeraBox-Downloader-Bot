@@ -15,7 +15,7 @@ def home():
     return "MnBot is running!"
 
 def run_flask():
-    app.run(host='0.0.0.0', port=8000)
+    app.run(host='0.0.0.0', port=8080)
 
 class MN_Bot(Client):
     def __init__(self):
