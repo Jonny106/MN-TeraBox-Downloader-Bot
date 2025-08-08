@@ -161,9 +161,8 @@ async def handle_terabox(client, message: Message):
                 shutil.copyfileobj(r.raw, f)
 
         caption = (
-            f"File Name: {info['name']}\n"
-            f"File Size: {info['size_str']}\n"
-            f"Link: {url}"
+            f"File Name: {info['<code>{name}</code>']}\n"
+            
         )
 
         if is_video(info["name"]):
