@@ -22,7 +22,7 @@ TERABOX_REGEX = r'https?://(?:www\.)?[^/\s]*tera[^/\s]*\.[a-z]+/s/[^\s]+'
 logging.basicConfig(format='%(asctime)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 OWNER_ID = os.environ.get("OWNER")
-COOKIE = os.environ.get("COOKIE", "ndus=example_cookie_here")
+COOKIE = os.environ.get("COOKIE", "ndus=Y2YqaCTteHuiU3Ud_MYU7vHoVW4DNBi0MPmg_1tQ")
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0",
