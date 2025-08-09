@@ -126,9 +126,21 @@ def get_file_info(share_url: str) -> dict:
         "size_str": get_size(size_bytes)
     }
 
-@Client.on_message(filters.private & filters.regex(TERABOX_REGEX))
+@Client.on_message(filters.private)
 async def handle_terabox(client, message: Message):
     user_id = message.from_user.id
+
+    # Accept TeraBox links from text or caption (for media)
+    text = message.text or message.caption
+    if not text:
+        await message.reply("❌ Please send a message containing one or more TeraBox links.")
+        return
+
+    # Find all TeraBox links in text/caption
+    matches = re.findall(TERABOX_REGEX, text)
+    if not matches:
+        await message.reply("❌ No valid TeraBox links found in your message.")
+        return
 
     if IS_VERIFY and not await is_verified(user_id):
         verify_url = await build_verification_link(client.me.username, user_id)
@@ -144,68 +156,68 @@ async def handle_terabox(client, message: Message):
         )
         return
 
-    url = message.text.strip()
-    try:
-        info = get_file_info(url)
-    except Exception as e:
-        return await message.reply(f"❌ Failed to get file info:\n{e}")
+    for idx, url in enumerate(matches, 1):
+        await message.reply(f"📥 Processing file {idx}/{len(matches)}\nLink: {url}")
+        try:
+            info = get_file_info(url.strip())
+        except Exception as e:
+            await message.reply(f"❌ Failed to get file info for link {idx}:\n{e}")
+            continue
 
-    temp_path = os.path.join(tempfile.gettempdir(), info["name"])
+        temp_path = os.path.join(tempfile.gettempdir(), info["name"])
 
-    await message.reply("📥 Downloading...")
+        try:
+            with requests.get(info["download_link"], headers=DL_HEADERS, stream=True) as r:
+                r.raise_for_status()
+                with open(temp_path, "wb") as f:
+                    shutil.copyfileobj(r.raw, f)
 
-    try:
-        with requests.get(info["download_link"], headers=DL_HEADERS, stream=True) as r:
-            r.raise_for_status()
-            with open(temp_path, "wb") as f:
-                shutil.copyfileobj(r.raw, f)
+            caption = (
+                f"<code>File Name: {info['name']}</code>\n"
+                f"<code>File Size: {info['size_str']}</code>\n"
+                f"<code>Link: {url}</code>"
+            )
 
-        caption = (
-            f"<code>File Name: {info['name']}</code>\n"   
-             )
-
-        if is_video(info["name"]):
-            # Send as streamable video
-            if CHANNEL.ID:
-                await client.send_video(
-                    chat_id=CHANNEL.ID,
+            if is_video(info["name"]):
+                if CHANNEL.ID:
+                    await client.send_video(
+                        chat_id=CHANNEL.ID,
+                        video=temp_path,
+                        caption=caption,
+                        file_name=info["name"]
+                    )
+                sent_msg = await client.send_video(
+                    chat_id=message.chat.id,
                     video=temp_path,
                     caption=caption,
-                    file_name=info["name"]
+                    file_name=info["name"],
+                    protect_content=True
                 )
-            sent_msg = await client.send_video(
-                chat_id=message.chat.id,
-                video=temp_path,
-                caption=caption,
-                file_name=info["name"],
-                protect_content=True
-            )
-        else:
-            # Send as document (default)
-            if CHANNEL.ID:
-                await client.send_document(
-                    chat_id=CHANNEL.ID,
+            else:
+                if CHANNEL.ID:
+                    await client.send_document(
+                        chat_id=CHANNEL.ID,
+                        document=temp_path,
+                        caption=caption,
+                        file_name=info["name"]
+                    )
+                sent_msg = await client.send_document(
+                    chat_id=message.chat.id,
                     document=temp_path,
                     caption=caption,
-                    file_name=info["name"]
+                    file_name=info["name"],
+                    protect_content=True
                 )
-            sent_msg = await client.send_document(
-                chat_id=message.chat.id,
-                document=temp_path,
-                caption=caption,
-                file_name=info["name"],
-                protect_content=True
-            )
 
-        await message.reply("✅ File will be deleted from your chat after 12 hours.")
-        await asyncio.sleep(43200)
-        try:
-            await sent_msg.delete()
-        except Exception:
-            pass
+            await message.reply(f"✅ File {idx} will be deleted from your chat after 12 hours.")
+            await asyncio.sleep(43200)
+            try:
+                await sent_msg.delete()
+            except Exception:
+                pass
 
-    except Exception as e:
-        await message.reply(f"❌ Upload failed:\n`{e}`")
-    finally:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+        except Exception as e:
+            await message.reply(f"❌ Upload failed for link {idx}:\n`{e}`")
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
