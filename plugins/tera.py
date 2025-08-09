@@ -1,4 +1,5 @@
-# 
+# please give credits https://github.com/MN-BOTS
+#  @MrMNTG @MusammilN
 import os
 import re
 import uuid
@@ -17,7 +18,8 @@ from pymongo import MongoClient
 from config import CHANNEL, DATABASE
 
 # ---------- Global Constants ----------
-TERABOX_REGEX = r'https?://(?:www\.)?[^/\s]*tera[^/\s]*\.[a-z]+/s/[^\s]+'
+TERABOX_REGEX = r'https?://(?:www\.)?(terabox\.app|terabox\.com)/s/[a-zA-Z0-9_-]+'
+
 # ---------- Logger Setup ----------
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -105,7 +107,7 @@ class DownloadQueue:
             
             while self.queues[user_id]:
                 current_pos += 1
-                remaining_files = total_files - current_pos
+                remaining_files = len(self.queues[user_id]) - 1
                 task_func, url = self.queues[user_id][0]
                 
                 try:
@@ -134,7 +136,7 @@ class DownloadQueue:
                                 client, 
                                 user_id,
                                 f"⏳ Cool down: {remaining}s/30s\n"
-                                f"⬇️ Next: {current_pos}/{total_files}\n"
+                                f"⬇️ Next: Queue {current_pos}/{total_files}\n"
                                 f"💾 Size: {size_info}"
                             )
                             await asyncio.sleep(1)
@@ -148,7 +150,7 @@ class DownloadQueue:
                     await self.update_status(
                         client,
                         user_id,
-                        f"✅ Completed {current_pos}/{total_files}\n"
+                        f"✅ Completed Queue {current_pos}/{total_files}\n"
                         f"📦 Remaining: {remaining_files} file(s)"
                     )
                     await asyncio.sleep(1)
