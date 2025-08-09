@@ -56,26 +56,12 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                   "AppleWebKit/537.36 (KHTML, like Gecko) "
                   "Chrome/135.0.0.0 Safari/537.36 Edg/135.0.0.0",
-    "sec-ch-ua": '"Microsoft Edge";v="135", "Not-A.Brand";v="8", "Chromium";v="135"',
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
-    "Sec-Fetch-User": "?1",
     "Cookie": COOKIE,
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": '"Windows"',
 }
 DL_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                   "AppleWebKit/537.36 (KHTML, like Gecko) "
                   "Chrome/91.0.4472.124 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;"
-              "q=0.9,image/webp,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.5",
-    "Referer": "https://www.terabox.com/",
-    "DNT": "1",
-    "Connection": "keep-alive",
-    "Upgrade-Insecure-Requests": "1",
     "Cookie": COOKIE,
 }
 
@@ -86,6 +72,7 @@ class DownloadQueue:
         self.active_tasks = defaultdict(int)
         self.last_download_time = defaultdict(float)
         self.locks = defaultdict(asyncio.Lock)
+        self.status_messages = defaultdict(dict)
         
     async def add_task(self, user_id: int, is_admin: bool, task_func, url: str):
         async with self.locks[user_id]:
@@ -94,9 +81,16 @@ class DownloadQueue:
             
             position = len(self.queues[user_id]) + 1
             self.queues[user_id].append((task_func, url))
-            return True, f"✅ Added to queue (Position: {position})"
+            return True, f"📥 Added to queue (Position: {position})"
+
+    async def update_status(self, client: Client, user_id: int, message: str):
+        if user_id in self.status_messages:
+            try:
+                await self.status_messages[user_id].edit_text(message)
+            except:
+                pass
     
-    async def process_queue(self, user_id: int, is_admin: bool):
+    async def process_queue(self, client: Client, user_id: int, is_admin: bool, message: Message):
         if self.active_tasks[user_id] > 0:
             return
             
@@ -105,17 +99,43 @@ class DownloadQueue:
             while self.queues[user_id]:
                 task_func, url = self.queues[user_id][0]
                 
-                # Apply delay for non-admins
+                # Create status message
+                queue_status = f"📊 Queue Status: {len(self.queues[user_id])} item(s) remaining"
+                self.status_messages[user_id] = await message.reply(queue_status)
+                
+                # Apply delay for non-admins with countdown
                 if not is_admin:
                     elapsed = asyncio.get_event_loop().time() - self.last_download_time.get(user_id, 0)
                     if elapsed < 30:
-                        await asyncio.sleep(30 - elapsed)
+                        delay = 30 - elapsed
+                        for remaining in range(int(delay), 0, -1):
+                            await self.update_status(client, user_id, f"⏳ Waiting {remaining}s (30s cooldown)\n{queue_status}")
+                            await asyncio.sleep(1)
+                
+                # Update status before download starts
+                await self.update_status(client, user_id, f"⬇️ Downloading...\n{queue_status}")
                 
                 await task_func()
                 self.last_download_time[user_id] = asyncio.get_event_loop().time()
                 self.queues[user_id].pop(0)
+                
+                # Update status after download completes
+                if self.queues[user_id]:
+                    await self.update_status(client, user_id, f"✅ Download complete!\n📊 Queue Status: {len(self.queues[user_id])} item(s) remaining")
+                else:
+                    await self.update_status(client, user_id, "✅ All downloads completed!")
+                    try:
+                        await self.status_messages[user_id].delete()
+                    except:
+                        pass
         finally:
             self.active_tasks[user_id] -= 1
+            if user_id in self.status_messages:
+                try:
+                    await self.status_messages[user_id].delete()
+                except:
+                    pass
+                del self.status_messages[user_id]
 
 queue = DownloadQueue()
 
@@ -186,17 +206,9 @@ async def delete_later_task(sent_msg, file_path, delay=43200):
             pass
 
 # ---------- admin check ----------
-UPDATES_CHANNEL = "@Request_bots"
-
-async def is_admin(client: Client, user_id: int) -> bool:
-    """Check if user is owner or channel admin"""
-    if OWNER_ID and str(user_id) == str(OWNER_ID):
-        return True
-    try:
-        member = await client.get_chat_member(UPDATES_CHANNEL, user_id)
-        return member.status in ("administrator", "creator")
-    except Exception:
-        return False
+def is_admin(user_id: int) -> bool:
+    """Check if user is owner"""
+    return OWNER_ID and str(user_id) == str(OWNER_ID)
 
 # ---------- message handler ----------
 async def process_single_link(client: Client, message: Message, url: str):
@@ -210,7 +222,6 @@ async def process_single_link(client: Client, message: Message, url: str):
     temp_path = os.path.join(tempfile.gettempdir(), safe_name)
 
     try:
-        await message.reply(f"⬇️ Downloading {info['name']} ({info['size_str']})...")
         await asyncio.to_thread(download_file_sync, info["download_link"], temp_path)
     except Exception as e:
         await message.reply(f"❌ Download failed:\n`{e}`")
@@ -243,7 +254,6 @@ async def process_single_link(client: Client, message: Message, url: str):
             sent_msg = await client.send_document(chat_id=message.chat.id, document=temp_path, caption=caption, file_name=info["name"], protect_content=True)
 
         asyncio.create_task(delete_later_task(sent_msg, temp_path, delay=43200))
-        await message.reply(f"✅ Download complete! Scheduled deletion in 12 hours.")
     except Exception as e:
         await message.reply(f"❌ Upload failed:\n`{e}`")
         if os.path.exists(temp_path):
@@ -280,7 +290,7 @@ async def handle_terabox(client: Client, message: Message):
         )
         return
 
-    admin_status = await is_admin(client, user_id)
+    admin_status = is_admin(user_id)
     
     for url in matches:
         async def create_task(url=url):
@@ -290,4 +300,4 @@ async def handle_terabox(client: Client, message: Message):
         await message.reply(reply)
         
     # Start processing if not already running
-    asyncio.create_task(queue.process_queue(user_id, admin_status))
+    asyncio.create_task(queue.process_queue(client, user_id, admin_status, message))
