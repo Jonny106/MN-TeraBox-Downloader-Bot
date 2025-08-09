@@ -8,12 +8,16 @@ import requests
 import asyncio
 import shutil
 import mimetypes
+from collections import defaultdict
 from urllib.parse import urlencode, urlparse, parse_qs
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from verify_patch import IS_VERIFY, is_verified, build_verification_link, HOW_TO_VERIFY
 from pymongo import MongoClient
 from config import CHANNEL, DATABASE
+
+# ---------- Environment Config ----------
+OWNER_ID = os.environ.get("OWNER")  # Set OWNER=your_telegram_id in environment
 
 # ---------- Helpers ----------
 def is_video(filename):
@@ -75,16 +79,47 @@ DL_HEADERS = {
     "Cookie": COOKIE,
 }
 
-# ---------- Concurrency control ----------
-# Locks to ensure one active queue per non-admin user
-user_locks = {}  # user_id -> asyncio.Lock()
+# ---------- Queue Management System ----------
+class DownloadQueue:
+    def __init__(self):
+        self.queues = defaultdict(list)
+        self.active_tasks = defaultdict(int)
+        self.last_download_time = defaultdict(float)
+        self.locks = defaultdict(asyncio.Lock)
+        
+    async def add_task(self, user_id: int, is_admin: bool, task_func, url: str):
+        async with self.locks[user_id]:
+            if not is_admin and len(self.queues[user_id]) >= 5:
+                return False, "❌ Queue limit reached (max 5). Please wait for current downloads to finish."
+            
+            position = len(self.queues[user_id]) + 1
+            self.queues[user_id].append((task_func, url))
+            return True, f"✅ Added to queue (Position: {position})"
+    
+    async def process_queue(self, user_id: int, is_admin: bool):
+        if self.active_tasks[user_id] > 0:
+            return
+            
+        self.active_tasks[user_id] += 1
+        try:
+            while self.queues[user_id]:
+                task_func, url = self.queues[user_id][0]
+                
+                # Apply delay for non-admins
+                if not is_admin:
+                    elapsed = asyncio.get_event_loop().time() - self.last_download_time.get(user_id, 0)
+                    if elapsed < 30:
+                        await asyncio.sleep(30 - elapsed)
+                
+                await task_func()
+                self.last_download_time[user_id] = asyncio.get_event_loop().time()
+                self.queues[user_id].pop(0)
+        finally:
+            self.active_tasks[user_id] -= 1
 
-def get_user_lock(user_id: int) -> asyncio.Lock:
-    if user_id not in user_locks:
-        user_locks[user_id] = asyncio.Lock()
-    return user_locks[user_id]
+queue = DownloadQueue()
 
-# ---------- Core terabox helpers (kept from your original) ----------
+# ---------- Core terabox helpers ----------
 def get_file_info_sync(share_url: str) -> dict:
     resp = requests.get(share_url, headers=HEADERS, allow_redirects=True, timeout=30)
     if resp.status_code != 200:
@@ -151,34 +186,86 @@ async def delete_later_task(sent_msg, file_path, delay=43200):
             pass
 
 # ---------- admin check ----------
-# Change this to your updates channel username if different
 UPDATES_CHANNEL = "@Request_bots"
 
-async def is_admin_in_updates_channel(client: Client, user_id: int) -> bool:
+async def is_admin(client: Client, user_id: int) -> bool:
+    """Check if user is owner or channel admin"""
+    if OWNER_ID and str(user_id) == str(OWNER_ID):
+        return True
     try:
         member = await client.get_chat_member(UPDATES_CHANNEL, user_id)
         return member.status in ("administrator", "creator")
     except Exception:
-        # If get_chat_member fails (e.g. bot not in channel), treat as non-admin
         return False
 
 # ---------- message handler ----------
+async def process_single_link(client: Client, message: Message, url: str):
+    try:
+        info = await asyncio.to_thread(get_file_info_sync, url.strip())
+    except Exception as e:
+        await message.reply(f"❌ Failed to get file info:\n{e}")
+        return
+
+    safe_name = f"{uuid.uuid4().hex}_{info['name']}"
+    temp_path = os.path.join(tempfile.gettempdir(), safe_name)
+
+    try:
+        await message.reply(f"⬇️ Downloading {info['name']} ({info['size_str']})...")
+        await asyncio.to_thread(download_file_sync, info["download_link"], temp_path)
+    except Exception as e:
+        await message.reply(f"❌ Download failed:\n`{e}`")
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
+        return
+
+    caption = (
+        f"<code>File Name: {info['name']}</code>\n"
+        f"<code>File Size: {info['size_str']}</code>\n"
+        f"<code>Link: {url}</code>"
+    )
+
+    try:
+        if getattr(CHANNEL, "ID", None):
+            try:
+                if is_video(info["name"]):
+                    await client.send_video(chat_id=CHANNEL.ID, video=temp_path, caption=caption, file_name=info["name"])
+                else:
+                    await client.send_document(chat_id=CHANNEL.ID, document=temp_path, caption=caption, file_name=info["name"])
+            except Exception:
+                pass
+
+        if is_video(info["name"]):
+            sent_msg = await client.send_video(chat_id=message.chat.id, video=temp_path, caption=caption, file_name=info["name"], protect_content=True)
+        else:
+            sent_msg = await client.send_document(chat_id=message.chat.id, document=temp_path, caption=caption, file_name=info["name"], protect_content=True)
+
+        asyncio.create_task(delete_later_task(sent_msg, temp_path, delay=43200))
+        await message.reply(f"✅ Download complete! Scheduled deletion in 12 hours.")
+    except Exception as e:
+        await message.reply(f"❌ Upload failed:\n`{e}`")
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
+
 @Client.on_message(filters.private)
 async def handle_terabox(client: Client, message: Message):
     user_id = message.from_user.id
-    # accept text or caption
     text = (message.text or message.caption or "").strip()
+    
     if not text:
         await message.reply("❌ Please send a message containing one or more TeraBox links.")
         return
 
-    # extract links
     matches = re.findall(TERABOX_REGEX, text)
     if not matches:
         await message.reply("❌ No valid TeraBox links found in your message.")
         return
 
-    # verification check
     if IS_VERIFY and not await is_verified(user_id):
         verify_url = await build_verification_link(client.me.username, user_id)
         buttons = [
@@ -193,102 +280,14 @@ async def handle_terabox(client: Client, message: Message):
         )
         return
 
-    # check admin status in updates channel
-    is_admin = await is_admin_in_updates_channel(client, user_id)
-
-    # If not admin -> ensure single active queue per user using a lock
-    user_lock = get_user_lock(user_id)
-    if not is_admin:
-        if user_lock.locked():
-            await message.reply("🔒 You already have an active download queue. Please wait until it finishes.")
-            return
-        # acquire lock for non-admins (will be released after queue completes)
-        await user_lock.acquire()
-
-    # Run the sequential processing in a background task so handler returns quickly
-    asyncio.create_task(process_links_sequentially(client, message, matches, is_admin, user_lock))
-
-async def process_links_sequentially(client: Client, message: Message, matches: list, is_admin: bool, user_lock: asyncio.Lock):
-    user_id = message.from_user.id
-    total = len(matches)
-    try:
-        for idx, url in enumerate(matches, start=1):
-            await message.reply(f"🟡 Task {idx}/{total}: Preparing to download\n{url}")
-
-            # fetch file info in thread to avoid blocking
-            try:
-                info = await asyncio.to_thread(get_file_info_sync, url.strip())
-            except Exception as e:
-                await message.reply(f"❌ Task {idx}: Failed to get file info:\n{e}")
-                # continue to next link instead of aborting all
-                continue
-
-            # build unique temp path (avoid conflicts)
-            safe_name = f"{uuid.uuid4().hex}_{info['name']}"
-            temp_path = os.path.join(tempfile.gettempdir(), safe_name)
-
-            # download in thread
-            try:
-                await message.reply(f"⬇️ Task {idx}: Downloading {info['name']} ({info['size_str']})...")
-                await asyncio.to_thread(download_file_sync, info["download_link"], temp_path)
-            except Exception as e:
-                await message.reply(f"❌ Task {idx}: Download failed:\n`{e}`")
-                if os.path.exists(temp_path):
-                    try:
-                        os.remove(temp_path)
-                    except Exception:
-                        pass
-                continue
-
-            # prepare caption
-            caption = (
-                f"<code>File Name: {info['name']}</code>\n"
-                f"<code>File Size: {info['size_str']}</code>\n"
-                f"<code>Link: {url}</code>"
-            )
-
-            sent_msg = None
-            try:
-                # optionally forward to channel first
-                if getattr(CHANNEL, "ID", None):
-                    try:
-                        if is_video(info["name"]):
-                            await client.send_video(chat_id=CHANNEL.ID, video=temp_path, caption=caption, file_name=info["name"])
-                        else:
-                            await client.send_document(chat_id=CHANNEL.ID, document=temp_path, caption=caption, file_name=info["name"])
-                    except Exception:
-                        # channel send errors should not block user delivery
-                        pass
-
-                # send to user
-                if is_video(info["name"]):
-                    sent_msg = await client.send_video(chat_id=message.chat.id, video=temp_path, caption=caption, file_name=info["name"], protect_content=True)
-                else:
-                    sent_msg = await client.send_document(chat_id=message.chat.id, document=temp_path, caption=caption, file_name=info["name"], protect_content=True)
-
-                # schedule deletion in background (12 hours)
-                asyncio.create_task(delete_later_task(sent_msg, temp_path, delay=43200))
-
-                await message.reply(f"✅ Task {idx}: Done! Scheduled deletion in 12 hours.")
-            except Exception as e:
-                await message.reply(f"❌ Task {idx}: Upload failed:\n`{e}`")
-                # cleanup
-                try:
-                    if os.path.exists(temp_path):
-                        os.remove(temp_path)
-                except Exception:
-                    pass
-                continue
-
-            # small pause between tasks to be polite (avoid rate limits). admins can skip the pause.
-            if not is_admin:
-                await asyncio.sleep(2)
-
-    finally:
-        # release lock for non-admins
-        if not is_admin and user_lock.locked():
-            try:
-                user_lock.release()
-            except Exception:
-                pass
-                        
+    admin_status = await is_admin(client, user_id)
+    
+    for url in matches:
+        async def create_task(url=url):
+            await process_single_link(client, message, url)
+        
+        success, reply = await queue.add_task(user_id, admin_status, create_task, url)
+        await message.reply(reply)
+        
+    # Start processing if not already running
+    asyncio.create_task(queue.process_queue(user_id, admin_status))
