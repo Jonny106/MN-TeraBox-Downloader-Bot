@@ -18,7 +18,7 @@ from pymongo import MongoClient
 from config import CHANNEL, DATABASE
 
 # ---------- Global Constants ----------
-TERABOX_REGEX = r'https?://(?:www\.)?(terabox\.app|terabox\.com)/s/[a-zA-Z0-9_-]+'
+TERABOX_REGEX = r'https?://(?:www\.)?[^/\s]*tera[^/\s]*\.[a-z]+/s/[^\s]+'
 
 # ---------- Logger Setup ----------
 logging.basicConfig(
