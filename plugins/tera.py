@@ -1,4 +1,5 @@
-# 
+# please give credits https://github.com/MN-BOTS
+#  @MrMNTG @MusammilN
 import os
 import re
 import uuid
@@ -17,7 +18,8 @@ from pymongo import MongoClient
 from config import CHANNEL, DATABASE
 
 # ---------- Global Constants ----------
-TERABOX_REGEX = r'https?://(?:www\.)?[^/\s]*tera[^/\s]*\.[a-z]+/s/[^\s]+'
+TERABOX_REGEX = r'https?://(?:www\.)?(terabox\.app|terabox\.com)/s/[a-zA-Z0-9_-]+'
+
 # ---------- Logger Setup ----------
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -76,7 +78,7 @@ class DownloadQueue:
         self.active_tasks = defaultdict(int)
         self.last_download_time = defaultdict(float)
         self.locks = defaultdict(asyncio.Lock)
-        self.status_messages = defaultdict(dict)
+        self.status_messages = defaultdict(list)
         
     async def add_task(self, user_id: int, is_admin: bool, task_func, url: str):
         async with self.locks[user_id]:
@@ -87,12 +89,24 @@ class DownloadQueue:
             self.queues[user_id].append((task_func, url))
             return True, f"📥 Added to queue (Position: {position})"
 
-    async def update_status(self, client: Client, user_id: int, message: str):
-        if user_id in self.status_messages:
+    async def send_status(self, client: Client, user_id: int, message: str):
+        """Send a new status message and store it"""
+        try:
+            msg = await client.send_message(user_id, message)
+            self.status_messages[user_id].append(msg)
+            return msg
+        except Exception as e:
+            logger.error(f"Failed to send status: {e}")
+            return None
+
+    async def cleanup_status(self, client: Client, user_id: int):
+        """Delete all stored status messages for a user"""
+        for msg in self.status_messages.get(user_id, []):
             try:
-                await self.status_messages[user_id].edit_text(message)
+                await msg.delete()
             except Exception as e:
-                logger.error(f"Failed to update status: {e}")
+                logger.error(f"Failed to delete status message: {e}")
+        self.status_messages[user_id] = []
 
     async def process_queue(self, client: Client, user_id: int, is_admin: bool, message: Message):
         if self.active_tasks[user_id] > 0:
@@ -105,7 +119,7 @@ class DownloadQueue:
             
             while self.queues[user_id]:
                 current_pos += 1
-                remaining_files = total_files - current_pos
+                remaining_files = len(self.queues[user_id]) - 1
                 task_func, url = self.queues[user_id][0]
                 
                 try:
@@ -113,16 +127,15 @@ class DownloadQueue:
                     size_info = info['size_str']
                 except Exception as e:
                     logger.error(f"Failed to get file info: {e}")
-                    info = None
                     size_info = "Unknown size"
 
-                # Update status before download
+                # Send new status message for download start
                 status_msg = (
-                    f"⬇️ Downloading {current_pos}/{total_files}\n"
+                    f"⬇️ Queue {current_pos}/{total_files}\n"
                     f"📦 Remaining: {remaining_files} file(s)\n"
                     f"💾 Size: {size_info}"
                 )
-                await self.update_status(client, user_id, status_msg)
+                await self.send_status(client, user_id, status_msg)
                 
                 # Apply delay for non-admins
                 if not is_admin:
@@ -130,42 +143,23 @@ class DownloadQueue:
                     if elapsed < 30:
                         delay = 30 - elapsed
                         for remaining in range(int(delay), 0, -1):
-                            await self.update_status(
-                                client, 
-                                user_id,
-                                f"⏳ Cool down: {remaining}s/30s\n"
-                                f"⬇️ Next: {current_pos}/{total_files}\n"
-                                f"💾 Size: {size_info}"
-                            )
                             await asyncio.sleep(1)
                 
                 await task_func()
                 self.last_download_time[user_id] = asyncio.get_event_loop().time()
                 self.queues[user_id].pop(0)
                 
-                # Update status after download
+                # Cleanup status messages after download
+                await self.cleanup_status(client, user_id)
+                
+                # Brief pause between downloads
                 if self.queues[user_id]:
-                    await self.update_status(
-                        client,
-                        user_id,
-                        f"✅ Completed {current_pos}/{total_files}\n"
-                        f"📦 Remaining: {remaining_files} file(s)"
-                    )
                     await asyncio.sleep(1)
-                else:
-                    await self.update_status(client, user_id, "✅ All downloads completed!")
-                    try:
-                        await self.status_messages[user_id].delete()
-                    except Exception as e:
-                        logger.error(f"Failed to delete status message: {e}")
+                
         finally:
             self.active_tasks[user_id] -= 1
-            if user_id in self.status_messages:
-                try:
-                    await self.status_messages[user_id].delete()
-                except Exception as e:
-                    logger.error(f"Failed to clean up status message: {e}")
-                del self.status_messages[user_id]
+            if not self.queues[user_id]:
+                await self.cleanup_status(client, user_id)
 
 queue = DownloadQueue()
 
