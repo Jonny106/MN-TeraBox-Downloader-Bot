@@ -1,4 +1,3 @@
-# 
 import os
 import re
 import uuid
@@ -52,7 +51,7 @@ def find_between(text: str, start: str, end: str) -> str:
 mongo_client = MongoClient(DATABASE.URI)
 db = mongo_client[DATABASE.NAME]
 
-COOKIE = "ndus=Y2YqaCTteHuiU3Ud_MYU7vHoVW4DNBi0MPmg_1tQ"  # keep or use your env
+COOKIE = "ndus=Y2YqaCTteHuiU3Ud_MYU7vHoVW4DNBi0MPmg_1tQ"
 HEADERS = {
     "Accept": "application/json, text/plain, */*",
     "Accept-Encoding": "gzip, deflate, br",
@@ -61,11 +60,11 @@ HEADERS = {
     "DNT": "1",
     "Host": "www.terabox.app",
     "Upgrade-Insecure-Requests": "1",
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36 Edg/135.0.0.0",
+    "User-Agent": "Mozilla/5.0",
     "Cookie": COOKIE,
 }
 DL_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+    "User-Agent": "Mozilla/5.0",
     "Cookie": COOKIE,
 }
 
@@ -76,96 +75,74 @@ class DownloadQueue:
         self.active_tasks = defaultdict(int)
         self.last_download_time = defaultdict(float)
         self.locks = defaultdict(asyncio.Lock)
-        self.status_messages = defaultdict(dict)
-        
+
     async def add_task(self, user_id: int, is_admin: bool, task_func, url: str):
         async with self.locks[user_id]:
             if not is_admin and len(self.queues[user_id]) >= 5:
-                return False, "❌ Queue limit reached (max 5). Please wait for current downloads to finish."
-            
+                return False, "❌ Queue limit reached (max 5). Please wait."
             position = len(self.queues[user_id]) + 1
             self.queues[user_id].append((task_func, url))
             return True, f"📥 Added to queue (Position: {position})"
 
-    async def update_status(self, client: Client, user_id: int, message: str):
-        if user_id in self.status_messages:
-            try:
-                await self.status_messages[user_id].edit_text(message)
-            except Exception as e:
-                logger.error(f"Failed to update status: {e}")
-
     async def process_queue(self, client: Client, user_id: int, is_admin: bool, message: Message):
         if self.active_tasks[user_id] > 0:
             return
-            
         self.active_tasks[user_id] += 1
         try:
             total_files = len(self.queues[user_id])
             current_pos = 0
-            
             while self.queues[user_id]:
                 current_pos += 1
                 remaining_files = total_files - current_pos
                 task_func, url = self.queues[user_id][0]
-                
+
                 try:
                     info = await asyncio.to_thread(get_file_info_sync, url.strip())
                     size_info = info['size_str']
+                    file_name = info['name']
                 except Exception as e:
                     logger.error(f"Failed to get file info: {e}")
-                    info = None
                     size_info = "Unknown size"
+                    file_name = "Unknown file"
 
-                # Update status before download
-                status_msg = (
-                    f"⬇️ Downloading {current_pos}/{total_files}\n"
+                # NEW: Send start message for this queue item
+                start_msg = await message.reply(
+                    f"⬇️ Queue {current_pos}/{total_files}\n"
                     f"📦 Remaining: {remaining_files} file(s)\n"
+                    f"📁 File: {file_name}\n"
                     f"💾 Size: {size_info}"
                 )
-                await self.update_status(client, user_id, status_msg)
-                
-                # Apply delay for non-admins
+
+                # Cooldown for non-admins
                 if not is_admin:
                     elapsed = asyncio.get_event_loop().time() - self.last_download_time.get(user_id, 0)
                     if elapsed < 30:
                         delay = 30 - elapsed
-                        for remaining in range(int(delay), 0, -1):
-                            await self.update_status(
-                                client, 
-                                user_id,
-                                f"⏳ Cool down: {remaining}s/30s\n"
-                                f"⬇️ Next: {current_pos}/{total_files}\n"
-                                f"💾 Size: {size_info}"
-                            )
+                        for sec in range(int(delay), 0, -1):
+                            try:
+                                await start_msg.edit_text(
+                                    f"⏳ Cool down: {sec}s/30s\n"
+                                    f"⬇️ Next: {current_pos}/{total_files}\n"
+                                    f"📁 File: {file_name}\n"
+                                    f"💾 Size: {size_info}"
+                                )
+                            except:
+                                pass
                             await asyncio.sleep(1)
-                
+
                 await task_func()
                 self.last_download_time[user_id] = asyncio.get_event_loop().time()
                 self.queues[user_id].pop(0)
-                
-                # Update status after download
-                if self.queues[user_id]:
-                    await self.update_status(
-                        client,
-                        user_id,
-                        f"✅ Completed {current_pos}/{total_files}\n"
-                        f"📦 Remaining: {remaining_files} file(s)"
-                    )
-                    await asyncio.sleep(1)
-                else:
-                    await self.update_status(client, user_id, "✅ All downloads completed!")
-                    try:
-                        await self.status_messages[user_id].delete()
-                    except Exception as e:
-                        logger.error(f"Failed to delete status message: {e}")
+
+                # Delete start message after file completes
+                try:
+                    await start_msg.delete()
+                except:
+                    pass
+
+            await message.reply("✅ All downloads completed!")
         finally:
             self.active_tasks[user_id] -= 1
-            if user_id in self.status_messages:
-                try:
-                    await self.status_messages[user_id].delete()
-                except Exception as e:
-                    logger.error(f"Failed to clean up status message: {e}")
-                del self.status_messages[user_id]
 
 queue = DownloadQueue()
 
@@ -244,7 +221,6 @@ async def delete_later_task(sent_msg, file_path, delay=43200):
 
 # ---------- admin check ----------
 def is_admin(user_id: int) -> bool:
-    """Check if user is owner"""
     return OWNER_ID and str(user_id) == str(OWNER_ID)
 
 # ---------- message handler ----------
@@ -271,7 +247,6 @@ async def process_single_link(client: Client, message: Message, url: str):
                 pass
         return
 
-    # Simplified caption without link
     caption = f"📁 {info['name']}\n💾 Size: {info['size_str']}"
 
     try:
@@ -350,9 +325,8 @@ async def handle_terabox(client: Client, message: Message):
     for url in matches:
         async def create_task(url=url):
             await process_single_link(client, message, url)
-        
         success, reply = await queue.add_task(user_id, admin_status, create_task, url)
         await message.reply(reply)
         
-    # Start processing if not already running
     asyncio.create_task(queue.process_queue(client, user_id, admin_status, message))
+    
