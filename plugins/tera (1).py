@@ -17,7 +17,6 @@ import aiohttp
 import requests  # used for some quick json endpoints if needed
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
-from verify_patch import IS_VERIFY, is_verified, build_verification_link, HOW_TO_VERIFY
 from pymongo import MongoClient
 from config import CHANNEL, DATABASE
 
@@ -438,19 +437,6 @@ async def handle_terabox(client: Client, message: Message):
         await message.reply("❌ No valid TeraBox links found in your message.")
         return
 
-    if IS_VERIFY and not await is_verified(user_id):
-        verify_url = await build_verification_link(client.me.username, user_id)
-        buttons = [
-            [
-                InlineKeyboardButton("✅ Verify Now", url=verify_url),
-                InlineKeyboardButton("📖 Tutorial", url=HOW_TO_VERIFY)
-            ]
-        ]
-        await message.reply_text(
-            "🔐 You must verify before using this command.\n\n⏳ Verification lasts for 12 hours.",
-            reply_markup=InlineKeyboardMarkup(buttons)
-        )
-        return
 
     admin_status = is_admin(user_id)
 
