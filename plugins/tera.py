@@ -122,11 +122,14 @@ def get_file_info(share_url: str) -> dict:
 @Client.on_message(filters.private)
 async def handle_terabox(client, message: Message):
     user_id = message.from_user.id
+
+    # Accept TeraBox links from text or caption (for media)
     text = message.text or message.caption
     if not text:
         await message.reply("❌ Please send a message containing one or more TeraBox links.")
         return
 
+    # Find all TeraBox links in text/caption
     matches = re.findall(TERABOX_REGEX, text)
     if not matches:
         await message.reply("❌ No valid TeraBox links found in your message.")
@@ -135,8 +138,10 @@ async def handle_terabox(client, message: Message):
     if IS_VERIFY and not await is_verified(user_id):
         verify_url = await build_verification_link(client.me.username, user_id)
         buttons = [
-            [InlineKeyboardButton("✅ Verify Now", url=verify_url),
-             InlineKeyboardButton("📖 Tutorial", url=HOW_TO_VERIFY)]
+            [
+                InlineKeyboardButton("✅ Verify Now", url=verify_url),
+                InlineKeyboardButton("📖 Tutorial", url=HOW_TO_VERIFY)
+            ]
         ]
         await message.reply_text(
             "🔐 You must verify before using this command.\n\n⏳ Verification lasts for 12 hours.",
@@ -154,6 +159,7 @@ async def handle_terabox(client, message: Message):
             continue
 
         temp_path = os.path.join(tempfile.gettempdir(), info["name"])
+
         try:
             with requests.get(info["download_link"], headers=DL_HEADERS, stream=True) as r:
                 r.raise_for_status()
