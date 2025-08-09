@@ -13,8 +13,7 @@ cloudscraper
 requests
 beautifulsoup4
 lxml
-torrent-parser
-bencodepy
+
 certifi
 urllib3
 setuptools
