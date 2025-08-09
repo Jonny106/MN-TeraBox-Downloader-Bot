@@ -161,7 +161,7 @@ async def handle_terabox(client, message: Message):
                 shutil.copyfileobj(r.raw, f)
 
         caption = (
-            f"File Name: {info['<code>{name}</code>']}\n"
+            f"File Name: {info['<code>'name'</code>']}\n"
             
         )
 
