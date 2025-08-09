@@ -157,7 +157,7 @@ async def handle_terabox(client, message: Message):
         return
 
     for idx, url in enumerate(matches, 1):
-        await message.reply(f"📥 Processing file {idx}/{len(matches)}\nLink: {url}")
+        await message.reply(f"📥 Task {idx}/{len(matches)}: Processing link\n{url}")
         try:
             info = get_file_info(url.strip())
         except Exception as e:
@@ -209,7 +209,7 @@ async def handle_terabox(client, message: Message):
                     protect_content=True
                 )
 
-            await message.reply(f"✅ File {idx} will be deleted from your chat after 12 hours.")
+            await message.reply(f"✅ Task {idx}: File will be deleted from your chat after 12 hours.")
             await asyncio.sleep(43200)
             try:
                 await sent_msg.delete()
