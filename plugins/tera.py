@@ -434,9 +434,5 @@ async def callback_handler(client, callback_query):
         await callback_query.answer("Cancelling your queue...", show_alert=False)
         try:
             await callback_query.message.edit_text("⛔ Queue cancellation requested. Stopping tasks...")
-        except Exception:
-            pass
-
-except Exception as e:
-    logger.error(f"Download error: {e}", exc_info=True)
-
+        except Exception as e:
+            logger.error(f"Download error: {e}", exc_info=True)
