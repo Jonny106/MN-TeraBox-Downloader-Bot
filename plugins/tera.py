@@ -14,7 +14,7 @@ from collections import defaultdict
 from urllib.parse import urlencode, urlparse, parse_qs
 
 import aiohttp
-import requests  # used for some quick json endpoints if needed
+import requests
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from verify_patch import IS_VERIFY, is_verified, build_verification_link, HOW_TO_VERIFY
@@ -78,7 +78,7 @@ DL_HEADERS = {
 # ---------- Queue Management System ----------
 class DownloadQueue:
     def __init__(self):
-        # each user_id -> list of urls
+        # each user_id -> list of task dicts {'id': int, 'url': str}
         self.queues = defaultdict(list)
         # active workers per user (0 or 1)
         self.active_tasks = defaultdict(int)
@@ -86,24 +86,28 @@ class DownloadQueue:
         self.last_download_time = defaultdict(float)
         # per-user locks for queue operations
         self.locks = defaultdict(lambda: asyncio.Lock())
-        # messages shown to user for status
+        # messages shown to user for status (can be multiple but we keep one main)
         self.status_messages = defaultdict(list)
-        # cancellation flag per user
+        # cancellation flag per user (cancels entire queue)
         self.cancelled = defaultdict(bool)
+        # per-user incremental task id generator
+        self.next_task_id = defaultdict(int)
 
     async def add_task(self, user_id: int, is_admin: bool, url: str):
         async with self.locks[user_id]:
             if (not is_admin) and len(self.queues[user_id]) >= 5:
                 return False, "❌ Queue limit reached (max 5). Please wait for current downloads to finish."
-            pos = len(self.queues[user_id]) + 1
-            self.queues[user_id].append(url)
-            return True, f"📥 Added to queue (Position: {pos})"
+            # assign incremental task id
+            self.next_task_id[user_id] += 1
+            task_id = self.next_task_id[user_id]
+            self.queues[user_id].append({"id": task_id, "url": url})
+            pos = len(self.queues[user_id])
+            return True, f"📥 Added to queue (Position: {pos}, Queue {task_id})"
 
     async def send_status(self, client: Client, chat_id: int, text: str, with_cancel: bool = True):
         buttons = None
         if with_cancel:
-            # callback includes the user id so handler can verify
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("⛔ Cancel Queue", callback_data=f"cancel_q")]])
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("⛔ Cancel Queue", callback_data="cancel_q")]])
             buttons = kb
         try:
             msg = await client.send_message(chat_id, text, reply_markup=buttons)
@@ -138,43 +142,53 @@ class DownloadQueue:
                 if self.cancelled.get(user_id, False):
                     # clear queue and inform user
                     self.queues[user_id].clear()
-                    await trigger_message.reply("❌ Your queue was cancelled.")
+                    try:
+                        await trigger_message.reply("❌ Your queue was cancelled.")
+                    except Exception:
+                        pass
                     self.cancelled[user_id] = False
                     await self.cleanup_status(client, user_id)
                     break
 
-                url = self.queues[user_id][0]
-                # enforce delay for non-admins (30s between tasks)
+                task = self.queues[user_id][0]
+                task_id = task["id"]
+                url = task["url"]
+
+                # enforce 30s delay for non-admins
                 if not is_admin:
                     elapsed = time.time() - self.last_download_time.get(user_id, 0)
                     if elapsed < 30:
-                        wait = 30 - elapsed
-                        await trigger_message.reply(f"⏳ Waiting {int(wait)}s before starting next task...")
+                        wait = int(30 - elapsed)
+                        try:
+                            await trigger_message.reply(f"⏳ Waiting {wait}s before starting next task...")
+                        except Exception:
+                            pass
                         await asyncio.sleep(wait)
 
-                # create a status message (we keep one active status per step)
-                info = None
+                # get file info
                 try:
                     info = await asyncio.to_thread(get_file_info_sync, url.strip())
                 except Exception as e:
                     logger.error(f"Failed to fetch file info: {e}")
-                    await trigger_message.reply(f"❌ Failed to get file info for:\n{url}\n`{e}`")
+                    try:
+                        await trigger_message.reply(f"❌ Failed to get file info for:\n{url}\n`{e}`")
+                    except Exception:
+                        pass
                     # remove and continue
                     self.queues[user_id].pop(0)
                     continue
 
+                # prepare status message header: Queue {task_id}
                 total_files = len(self.queues[user_id])
-                position = 1
+                position_in_queue = 1  # always 1 because this is front of queue
+                header = f"Queue {task_id}"
 
                 status_text = (
-                    f"⬇️ Starting download ({info['name']})\n"
-                    f"📦 Position: {position}/{total_files}\n"
-                    f"💾 Size: {info['size_str']}\n"
-                    f"🔗 {url}\n\n"
-                    f"Download: 0.00 MB / {info['size_str']}\n"
-                    f"Speed: 0.00 MB/s\n"
-                    f"Upload: 0.00 MB\n"
-                    f"Upload speed: 0.00 MB/s\n"
+                    f"{header}\n"
+                    f"⬇️ Downloading: {info['name']}\n"
+                    f"📥 Downloaded: 0 / {get_size(info.get('size_bytes', 0))}\n"
+                    f"🔄 Speed: 0.00 MB/s\n\n"
+                    f"⏳ To cancel this entire queue press the button below."
                 )
                 status_msg = await self.send_status(client, user_id, status_text, with_cancel=True)
                 if status_msg:
@@ -184,11 +198,11 @@ class DownloadQueue:
                 tmp_name = f"{uuid.uuid4().hex}_{info['name']}"
                 tmp_path = os.path.join(tempfile.gettempdir(), tmp_name)
                 try:
-                    await download_with_progress(client, status_msg, url, info, tmp_path, user_id, self)
-                except Exception as e:
-                    logger.error(f"Download error: {e}")
+                    await download_with_progress(client, status_msg, url, info, tmp_path, user_id, self, header)
+                except asyncio.CancelledError:
+                    # cancellation requested during download
                     try:
-                        await status_msg.edit_text(f"❌ Download failed for {info['name']}:\n`{e}`")
+                        await status_msg.edit_text(f"{header}\n⛔ Download cancelled.")
                     except Exception:
                         pass
                     if os.path.exists(tmp_path):
@@ -196,24 +210,37 @@ class DownloadQueue:
                             os.remove(tmp_path)
                         except Exception:
                             pass
-                    # pop and continue
                     self.queues[user_id].pop(0)
+                    await self.cleanup_status(client, user_id)
+                    continue
+                except Exception as e:
+                    logger.error(f"Download error: {e}")
+                    try:
+                        await status_msg.edit_text(f"{header}\n❌ Download failed for {info['name']}:\n`{e}`")
+                    except Exception:
+                        pass
+                    if os.path.exists(tmp_path):
+                        try:
+                            os.remove(tmp_path)
+                        except Exception:
+                            pass
+                    self.queues[user_id].pop(0)
+                    await self.cleanup_status(client, user_id)
                     await asyncio.sleep(1)
                     continue
 
                 # now upload to user with progress
                 try:
-                    await status_msg.edit_text(status_text + "\nUploading...")
+                    await status_msg.edit_text(f"{header}\n📤 Uploading: {info['name']}")
                 except Exception:
                     pass
 
                 try:
-                    await upload_with_progress(client, status_msg, tmp_path, info, trigger_message, user_id)
-                    # schedule deletion after upload via delete_later_task inside upload
+                    await upload_with_progress(client, status_msg, tmp_path, info, trigger_message, user_id, header)
                 except Exception as e:
                     logger.error(f"Upload failed: {e}")
                     try:
-                        await status_msg.edit_text(f"❌ Upload failed: `{e}`")
+                        await status_msg.edit_text(f"{header}\n❌ Upload failed: `{e}`")
                     except Exception:
                         pass
                     if os.path.exists(tmp_path):
@@ -221,8 +248,8 @@ class DownloadQueue:
                             os.remove(tmp_path)
                         except Exception:
                             pass
-                    # pop and continue
                     self.queues[user_id].pop(0)
+                    await self.cleanup_status(client, user_id)
                     await asyncio.sleep(1)
                     continue
 
@@ -236,18 +263,16 @@ class DownloadQueue:
                 await asyncio.sleep(1)
                 await self.cleanup_status(client, user_id)
 
-            # end while
         finally:
             self.active_tasks[user_id] -= 1
-            # ensure flags cleared
             self.cancelled[user_id] = False
             await self.cleanup_status(client, user_id)
+
 
 queue = DownloadQueue()
 
 # ---------- Core terabox helpers ----------
 def get_file_info_sync(share_url: str) -> dict:
-    # Reuse your original implementation but keep it safe
     resp = requests.get(share_url, headers=HEADERS, allow_redirects=True, timeout=30)
     if resp.status_code != 200:
         raise ValueError(f"Failed to fetch share page ({resp.status_code})")
@@ -292,7 +317,7 @@ def get_file_info_sync(share_url: str) -> dict:
     }
 
 # ---------- download with progress (aiohttp) ----------
-async def download_with_progress(client: Client, status_msg, share_url: str, info: dict, dest_path: str, user_id: int, queue_obj: DownloadQueue):
+async def download_with_progress(client: Client, status_msg, share_url: str, info: dict, dest_path: str, user_id: int, queue_obj: DownloadQueue, header: str):
     """
     Downloads file via aiohttp, updates status_msg periodically with speed and progress.
     Checks queue_obj.cancelled[user_id] to allow cancelling mid-download.
@@ -309,7 +334,6 @@ async def download_with_progress(client: Client, status_msg, share_url: str, inf
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=None)) as resp:
             if resp.status >= 400:
                 raise ValueError(f"Download request failed (status {resp.status})")
-            # prefer Content-Length header if available
             content_length = resp.headers.get("Content-Length")
             if content_length is not None:
                 try:
@@ -331,48 +355,48 @@ async def download_with_progress(client: Client, status_msg, share_url: str, inf
                     now = time.time()
                     # report every 1 second or on completion
                     if now - last_report >= 1 or (size_bytes and downloaded >= size_bytes):
-                        speed = (downloaded - last_downloaded) / (now - last_report + 1e-9)
+                        elapsed = now - last_report if now - last_report > 0 else 1
+                        speed = (downloaded - last_downloaded) / (elapsed + 1e-9)
                         last_report = now
                         last_downloaded = downloaded
-                        # build progress text
                         dfmt = get_size(downloaded)
                         tfmt = get_size(size_bytes) if size_bytes else info.get("size_str", "Unknown")
                         perc = (downloaded / size_bytes * 100) if size_bytes else 0.0
                         try:
                             pct_text = f"{perc:.2f}%" if size_bytes else "?"
                             await status_msg.edit_text(
+                                f"{header}\n"
                                 f"⬇️ Downloading: {info['name']}\n"
-                                f"📦 Size: {tfmt}\n"
                                 f"📥 Downloaded: {dfmt} / {tfmt} ({pct_text})\n"
                                 f"🔄 Speed: {speed/1024/1024:.2f} MB/s\n\n"
-                                f"🔗 {share_url}\n\n"
+    
                                 f"⏳ To cancel this entire queue press the button below.",
                                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⛔ Cancel Queue", callback_data="cancel_q")]])
                             )
                         except Exception:
-                            # ignore edit errors
                             pass
     return dest_path
 
 # ---------- upload with progress (pyrogram progress callback) ----------
-async def upload_with_progress(client: Client, status_msg, file_path: str, info: dict, trigger_message: Message, user_id: int):
+async def upload_with_progress(client: Client, status_msg, file_path: str, info: dict, trigger_message: Message, user_id: int, header: str):
     total = os.path.getsize(file_path)
     start = time.time()
-    state = {"uploaded": 0, "last_time": start, "last_uploaded": 0}
+    state = {"last_time": start, "last_uploaded": 0}
 
     async def progress_callback(current, total_bytes):
         now = time.time()
-        uploaded = current
         elapsed = now - state["last_time"]
         if elapsed < 0.5:
             return  # throttle UI updates
+        uploaded = current
         speed = (uploaded - state["last_uploaded"]) / (elapsed + 1e-9)
         state["last_time"] = now
         state["last_uploaded"] = uploaded
         try:
             pct = uploaded / total_bytes * 100 if total_bytes else 0
             await status_msg.edit_text(
-                f"⬆️ Uploading: {info['name']}\n"
+                f"{header}\n"
+                f"📤 Uploading: {info['name']}\n"
                 f"📥 Uploaded: {get_size(uploaded)} / {get_size(total_bytes)} ({pct:.2f}%)\n"
                 f"🔄 Upload speed: {speed/1024/1024:.2f} MB/s\n\n"
                 f"⏳ Remaining files: {len(queue.queues[user_id]) - 1}"
@@ -380,37 +404,54 @@ async def upload_with_progress(client: Client, status_msg, file_path: str, info:
         except Exception:
             pass
 
-    # send to channel first if configured
-    sent_msg = None
+    # send to channel first if configured (keeps as before) - no change to caption here
     if getattr(CHANNEL, "ID", None):
         try:
             if is_video(info["name"]):
-                await client.send_video(chat_id=CHANNEL.ID, video=file_path, caption=f"{info['name']}\n{info['size_str']}")
+                await client.send_video(chat_id=CHANNEL.ID, video=file_path, caption=f"{info['name']}")
             else:
-                await client.send_document(chat_id=CHANNEL.ID, document=file_path, caption=f"{info['name']}\n{info['size_str']}")
+                await client.send_document(chat_id=CHANNEL.ID, document=file_path, caption=f"{info['name']}")
         except Exception as e:
             logger.error(f"Channel forward failed: {e}")
 
     # now actual user upload with progress callback
+    sent_msg = None
     if is_video(info["name"]):
         sent_msg = await client.send_video(
             chat_id=trigger_message.chat.id,
             video=file_path,
-            caption=f"{info['name']}\n{info['size_str']}",
+            caption=f"<code>{info['name']}</code>",
             file_name=info['name'],
+            parse_mode="html",
             progress=progress_callback
         )
     else:
         sent_msg = await client.send_document(
             chat_id=trigger_message.chat.id,
             document=file_path,
-            caption=f"{info['name']}\n{info['size_str']}",
+            caption=f"<code>{info['name']}</code>",
             file_name=info['name'],
+            parse_mode="html",
             progress=progress_callback
         )
 
     # schedule deletion of file/message after 12 hours
     asyncio.create_task(delete_later_task(sent_msg, file_path, delay=43200))
+
+# ---------- background deletion ----------
+async def delete_later_task(sent_msg, file_path, delay=43200):
+    try:
+        await asyncio.sleep(delay)
+        try:
+            await sent_msg.delete()
+        except Exception:
+            pass
+    finally:
+        try:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+        except Exception:
+            pass
 
 # ---------- admin check ----------
 def is_admin(user_id: int) -> bool:
@@ -452,27 +493,4 @@ async def handle_terabox(client: Client, message: Message):
         )
         return
 
-    admin_status = is_admin(user_id)
-
-    # add each url as a task
-    for url in matches:
-        success, reply = await queue.add_task(user_id, admin_status, url)
-        await message.reply(reply)
-
-    # start worker if not running
-    asyncio.create_task(queue.process_queue(client, user_id, admin_status, message))
-
-# ---------- callback handler (Cancel Queue) ----------
-@Client.on_callback_query()
-async def callback_handler(client, callback_query):
-    user_id = callback_query.from_user.id
-    # Only the owner / the queue owner can cancel
-    if callback_query.data == "cancel_q":
-        # mark cancellation
-        queue.cancel_queue(user_id)
-        await callback_query.answer("Cancelling your queue...", show_alert=False)
-        try:
-            await callback_query.message.edit_text("⛔ Queue cancellation requested. Stopping tasks...")
-        except Exception:
-            pass
-                    
+ 
