@@ -1,4 +1,3 @@
-# 
 import os
 import re
 import uuid
@@ -102,7 +101,11 @@ class DownloadQueue:
         try:
             total_files = len(self.queues[user_id])
             current_pos = 0
-            
+
+            # 🔹 Create the status message once
+            if user_id not in self.status_messages:
+                self.status_messages[user_id] = await message.reply(f"📜 Starting queue... {total_files} files")
+
             while self.queues[user_id]:
                 current_pos += 1
                 remaining_files = total_files - current_pos
@@ -111,15 +114,18 @@ class DownloadQueue:
                 try:
                     info = await asyncio.to_thread(get_file_info_sync, url.strip())
                     size_info = info['size_str']
+                    file_name = info['name']
                 except Exception as e:
                     logger.error(f"Failed to get file info: {e}")
                     info = None
                     size_info = "Unknown size"
+                    file_name = "Unknown file"
 
-                # Update status before download
+                # 🔹 Show current queue info before download
                 status_msg = (
-                    f"⬇️ Downloading {current_pos}/{total_files}\n"
+                    f"⬇️ Queue {current_pos}/{total_files}\n"
                     f"📦 Remaining: {remaining_files} file(s)\n"
+                    f"📁 File: {file_name}\n"
                     f"💾 Size: {size_info}"
                 )
                 await self.update_status(client, user_id, status_msg)
@@ -135,6 +141,7 @@ class DownloadQueue:
                                 user_id,
                                 f"⏳ Cool down: {remaining}s/30s\n"
                                 f"⬇️ Next: {current_pos}/{total_files}\n"
+                                f"📁 File: {file_name}\n"
                                 f"💾 Size: {size_info}"
                             )
                             await asyncio.sleep(1)
@@ -143,28 +150,31 @@ class DownloadQueue:
                 self.last_download_time[user_id] = asyncio.get_event_loop().time()
                 self.queues[user_id].pop(0)
                 
-                # Update status after download
-                if self.queues[user_id]:
-                    await self.update_status(
-                        client,
-                        user_id,
-                        f"✅ Completed {current_pos}/{total_files}\n"
-                        f"📦 Remaining: {remaining_files} file(s)"
-                    )
-                    await asyncio.sleep(1)
-                else:
-                    await self.update_status(client, user_id, "✅ All downloads completed!")
-                    try:
-                        await self.status_messages[user_id].delete()
-                    except Exception as e:
-                        logger.error(f"Failed to delete status message: {e}")
+                # 🔹 After each completed file
+                await self.update_status(
+                    client,
+                    user_id,
+                    f"✅ Completed {current_pos}/{total_files}\n"
+                    f"📁 {file_name}\n"
+                    f"💾 Size: {size_info}\n"
+                    f"📦 Remaining: {remaining_files} file(s)"
+                )
+                await asyncio.sleep(1)
+
+            # 🔹 Final message after all files done
+            await self.update_status(client, user_id, "✅ All downloads completed!")
+            try:
+                await self.status_messages[user_id].delete()
+            except:
+                pass
+
         finally:
             self.active_tasks[user_id] -= 1
             if user_id in self.status_messages:
                 try:
                     await self.status_messages[user_id].delete()
-                except Exception as e:
-                    logger.error(f"Failed to clean up status message: {e}")
+                except:
+                    pass
                 del self.status_messages[user_id]
 
 queue = DownloadQueue()
@@ -244,7 +254,6 @@ async def delete_later_task(sent_msg, file_path, delay=43200):
 
 # ---------- admin check ----------
 def is_admin(user_id: int) -> bool:
-    """Check if user is owner"""
     return OWNER_ID and str(user_id) == str(OWNER_ID)
 
 # ---------- message handler ----------
@@ -271,7 +280,6 @@ async def process_single_link(client: Client, message: Message, url: str):
                 pass
         return
 
-    # Simplified caption without link
     caption = f"📁 {info['name']}\n💾 Size: {info['size_str']}"
 
     try:
@@ -334,10 +342,8 @@ async def handle_terabox(client: Client, message: Message):
     if IS_VERIFY and not await is_verified(user_id):
         verify_url = await build_verification_link(client.me.username, user_id)
         buttons = [
-            [
-                InlineKeyboardButton("✅ Verify Now", url=verify_url),
-                InlineKeyboardButton("📖 Tutorial", url=HOW_TO_VERIFY)
-            ]
+            [InlineKeyboardButton("✅ Verify Now", url=verify_url),
+             InlineKeyboardButton("📖 Tutorial", url=HOW_TO_VERIFY)]
         ]
         await message.reply_text(
             "🔐 You must verify before using this command.\n\n⏳ Verification lasts for 12 hours.",
@@ -354,5 +360,5 @@ async def handle_terabox(client: Client, message: Message):
         success, reply = await queue.add_task(user_id, admin_status, create_task, url)
         await message.reply(reply)
         
-    # Start processing if not already running
     asyncio.create_task(queue.process_queue(client, user_id, admin_status, message))
+            
