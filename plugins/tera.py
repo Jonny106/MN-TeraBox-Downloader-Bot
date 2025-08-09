@@ -1,17 +1,14 @@
-#please give credits https://github.com/MN-BOTS
-#  @MrMNTG @MusammilN
+# Please give credits https://github.com/MN-BOTS
+#   @MrMNTG @MusammilN
 import os
 import re
 import tempfile
 import requests
 import asyncio
-from datetime import datetime, timedelta
 from urllib.parse import urlencode, urlparse, parse_qs
-from pyrogram import Client 
-from pyrogram import filters
-from pyrogram.types import Message
+from pyrogram import Client, filters
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from verify_patch import IS_VERIFY, is_verified, build_verification_link, HOW_TO_VERIFY
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pymongo import MongoClient
 import shutil
 from config import CHANNEL, DATABASE
@@ -23,10 +20,6 @@ def is_video(filename):
 
 mongo_client = MongoClient(DATABASE.URI)
 db = mongo_client[DATABASE.NAME]
-
-settings_col = db["terabox_settings"]
-queue_col = db["terabox_queue"]
-last_upload_col = db["terabox_lastupload"]
 
 TERABOX_REGEX = r'https?://(?:www\.)?[^/\s]*tera[^/\s]*\.[a-z]+/s/[^\s]+'
 
@@ -156,12 +149,13 @@ async def handle_terabox(client, message: Message):
         )
         return
 
+    # Sequentially process each link (task 1, task 2, ...)
     for idx, url in enumerate(matches, 1):
-        await message.reply(f"📥 Task {idx}/{len(matches)}: Processing link\n{url}")
+        await message.reply(f"🟡 Task {idx}/{len(matches)}: Downloading from\n{url}")
         try:
             info = get_file_info(url.strip())
         except Exception as e:
-            await message.reply(f"❌ Failed to get file info for link {idx}:\n{e}")
+            await message.reply(f"❌ Task {idx}: Failed to get file info:\n{e}")
             continue
 
         temp_path = os.path.join(tempfile.gettempdir(), info["name"])
@@ -209,7 +203,7 @@ async def handle_terabox(client, message: Message):
                     protect_content=True
                 )
 
-            await message.reply(f"✅ Task {idx}: File will be deleted from your chat after 12 hours.")
+            await message.reply(f"✅ Task {idx}: Done! File will be deleted after 12 hours.")
             await asyncio.sleep(43200)
             try:
                 await sent_msg.delete()
@@ -217,7 +211,7 @@ async def handle_terabox(client, message: Message):
                 pass
 
         except Exception as e:
-            await message.reply(f"❌ Upload failed for link {idx}:\n`{e}`")
+            await message.reply(f"❌ Task {idx}: Upload failed:\n`{e}`")
         finally:
             if os.path.exists(temp_path):
                 os.remove(temp_path)
